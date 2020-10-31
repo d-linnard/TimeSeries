@@ -1,0 +1,732 @@
+---
+title: "__Statistical Methods for Discrete Response, Time Series, and Panel Data (W271): Lab 3__"
+subtitle: "__Group 5__"
+author: 
+  - __Justin Trobec__
+  - __Ajit Barhate__
+  - __David Linnard Wheeler__
+geometry: margin=1in
+output:
+  pdf_document:
+    latex_engine: xelatex
+  number_sections: yes
+  html_document: default
+  toc: yes
+fontsize: 11pt
+
+---
+
+# U.S. traffic fatalities: 1980-2004
+
+In this lab, you are asked to answer the question **"Do changes in traffic laws affect traffic fatalities?"**  To do so, you will conduct the tasks specified below using the data set *driving.Rdata*, which includes 25 years of data that cover changes in various state drunk driving, seat belt, and speed limit laws. 
+
+Specifically, this data set contains data for the 48 continental U.S. states from 1980 through 2004. Various driving laws are indicated in the data set, such as the alcohol level at which drivers are considered legally intoxicated. There are also indicators for “per se” laws—where licenses can be revoked without a trial—and seat belt laws. A few economics and demographic variables are also included. The description of the each of the variables in the dataset is come with the dataset.
+
+# Part 1
+
+(30%) Load the data. Provide a description of the basic structure of the dataset, as we have done throughout the semester. Conduct a very thorough EDA, which should include both graphical and tabular techniques, on the dataset, including both the dependent variable *totfatrte* and the potential explanatory variables. You need to write a detailed narrative of your observations of your EDA. *Reminder: giving an "output dump" (i.e. providing a bunch of graphs and tables without description and hoping your audience will interpret them) will receive a zero in this exercise.*
+
+### Load libraries (code hidden for brevity)
+
+```{r, message=F, echo=F}
+# Packages for graphics
+library(ggplot2)
+library(gridExtra)
+library(ggExtra)
+library(naniar) # To visualize missing data
+library(Hmisc) # To tabulate a summary of the data
+library(maps) # for maps
+library(knitr) # format tables
+library(ggplot2) # For diagnostics
+# Packages for data wrangling
+library(dplyr)
+library(tidyr)
+library(reshape2)
+# Packages for inference /presentation of inference*
+library(stargazer)
+library(plm) # For estimating fixed and random effect model
+library(lmtest)
+library(sandwich) # for robust standard errors
+library(knitr)
+opts_chunk$set(tidy.opts=list(width.cutoff=60),tidy=TRUE)
+```
+
+### Load data
+```{r, results="hide"}
+# Import
+load("driving.RData")
+# Rename
+df <- data
+# Structure
+str(df)
+# Summary
+summary(df)
+```
+
+- After loading and inspecting the structure and dimensions of the data, we see that it is comprised of `r dim(df)[1]` x `r dim(df)[2]` data frame. Moreover, from the `str(df)` output, we see the `class` of each variable- this will be important information to revisit as we progress with EDA.
+
+- Now that we understand the basic data structure, we inspect the contents of the data:
+
+```{r , results="hide"}
+# Summary
+describe(df)
+```
+- From the summaries above (results are hidden to comply with the page limit) we see that the data does not appear to have any missing values (confirmed below) and that scales and summary statistics vary among the variables, except the indicator variables like `d80`. 
+
+- Also from the summaries above we can see that variables like `slnone`, `sl55`, `sl65`, `sl70`, `sl70plus`, `sl75`, `zeroto`, `per se`, `minage`, `bac08`, and `bac10` are not just comprised of 0 and 1- they have fractional values expressed as $\frac{m}{12}$ where $m$ is the month in which the law was enacted. We will not transform these variables because (i) they contain information and (ii) to binarize these variables would be assume that ther law enactments that occur within the year have the *same* effect as those laws that were enacted on say January 1st. That is to say that the 12-$m$ month has no effect on `totfatrte`.
+
+- We will verify the records per year and state are symmetric; the following commands verify that we have 48 records for each year and 25 for each state. Tabular results are hidden for brevity.
+
+```{r, results="hide"}
+table(df$state)
+table(df$year)
+```
+
+- After inspection of the data structure and summaries, we will proceed with more EDA.
+
+### Explortory Data Analysis
+
+- Before exploration of the univariate and multivariate relationships among the variables with tabular and graphical methods, we first check for missing data.
+```{r, results="hide"}
+# Are there any missing values/NAs?
+df[!complete.cases(df),]
+```
+- We found no missing values.
+
+- Before we proceed with the univariate analysis section below we will look for evidence of top and bottom-coded variables.
+```{r, results="hide"}
+head(df);tail(df)
+```
+- Evidence of no top or bottom-coded variables was not detected (i) when we look at the top and bottom of the dataframe or (ii) when we inspect histograms for sharp thresholds (see appendix). Again, the results are hidden to comply with the page limit. 
+
+- Next, we examine `totfatrte` over time for each state. Note that we log-transformed `totfatrte` to achieve normality. This transformation will be defended below.
+
+```{r message=F, warning=F, fig.cap="Growth curves of log(total fatalities per 100,000 population) over time for each state", echo=FALSE}
+
+# Open map data
+MainStates <- map_data("state")
+
+# Add new columns for traffic fatalities over time
+Statesdf <- df %>% 
+  dplyr::select(totfatrte, state, year, statepop) %>%
+  mutate("region" = rep(unique(MainStates$region)[-8],
+                       each=25))
+# By year
+ggplot(Statesdf, aes(x=year, y=log(totfatrte),
+                     colour = region)) +
+  geom_line() + geom_point(size=0.05, alpha=0.5) +
+  facet_wrap(~region) + 
+  theme_classic() +
+  theme(legend.position="none",
+      axis.text.y=element_text(size=4),
+      axis.text.x=element_text(size=4, angle = 90))
+```
+
+- From the growth curves above, we see some variation in log(`totfatrte`) for each state over time. Some states, like Arkansas, display flat rates, while others, like Wyoming have fallen only to rise again. This plot helps us understand `totfatrte` within states but does not help us understand regional differences in `totfatrte`.
+
+- To further explore (i) the distribution of `totfatrte` and (ii) regional differences in `totfatrte`, we now plot the average `totfatrte` for each state.
+
+```{r message=F, warning=F, fig.cap="A: Histogram of log(total falities/100,000 population). Each color represents a different state. B: Distribution of log(total traffic fatalities/100,000 population)", echo=FALSE}
+
+State.Mu.TF <- Statesdf %>%
+  group_by(region) %>%
+  summarise(TF.mu=mean(log(totfatrte)))
+
+# Rename column
+names(State.Mu.TF)[1] <- "region"
+
+# Merge fatality data with the MainStates data
+JoinedStates <- inner_join(MainStates,
+                           State.Mu.TF, by = "region")
+# plot
+A <- ggplot() + 
+  geom_polygon(data=JoinedStates ,
+               aes(x=long, y=lat, group=group,
+               fill=TF.mu),
+                color="black", lwd=0.3) +
+  scale_fill_gradient(low="blue", high="red") +
+  theme_classic() + coord_map("conic", lat0 = 30) + 
+  labs(title="A",fill=expression("log("~paste(frac("Total fatalities", "100,000 population"))~")"),size=2) +
+  theme(axis.line=element_blank(),
+        axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks=element_blank(),
+        axis.title.x=element_blank(),
+        axis.title.y=element_blank(),
+        legend.position="right",
+        panel.background=element_blank(),
+        panel.border=element_blank(),
+        panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank(),
+        plot.background=element_blank())+
+  theme(legend.title=element_text(size=5))
+#grid.arrange(A,B)
+```
+
+- From the histogram presented on the right side of the yearly box-plots below, we see that `totfatrte` is normally distributed, after log-transformation. When we plot histograms of `totfatret` for each state we see scale shifts in the distribution of `totfatrte` between states. For example, the distribution of `totfatrte` in Wyoming is shifted towards higher values compared to the distribution in other states like Massachusetts.
+
+- From the map below we can see some general patterns. First, we see that some western and southern states like Wyoming, New Mexico, and Mississippi, display relatively high values of log(`totfatrte`). Conversely, some northeastern states, like Massachusetts and New York display relatively low values of log(`totfatrte`). This figure tell us a lot about regional fatalities but not about fatality rates over time.
+
+- To get a better sense of nationwide fatality rates over time, we next show `totfatrte` over time for all states combined.
+
+```{r message=F,warning=F,  fig.cap="Nationwide log(total fatality rates per 100,000 population)", echo=FALSE}  
+
+B <- ggplot(Statesdf, aes(x=factor(year), y=log(totfatrte)),
+        group=year) +
+  geom_boxplot(color="grey60", outlier.colour = "grey60") +
+  geom_jitter(alpha=0.4,color="grey60",
+              position=position_jitter(width=0.1)) +
+  geom_smooth(method = "loess", se=F, 
+              aes(group=1), span=0.1, color="orangered", alpha=0.7) +
+  labs(title="B", y=expression("log("~paste(frac("Total fatalities", "100,000 population"))~")"), x="Time (1980-2004)") +
+  theme_classic() + 
+  theme(legend.position="none",
+        axis.title.y=element_text(size=8),
+        axis.text.x = element_text(angle = 90))
+B<-ggMarginal(B, type="histogram",
+           margins = "y",
+           col="gray",
+           fill = "grey83")
+
+grid.arrange(A,B)
+
+```
+
+- The plot above shows the slow drop in `totfatrte` nationwide over time. First,  `totfatrte` decreases from 1980 to the early 1980's. This decrease in `totfatrte` also corresponds with the inception and actions of Mothers Against Drunk Driving. During the mid to late-1980's `totfatrte` increases. Starting in the mid-1990s `totfatrte` remains stable over time.
+
+- What is responsible for these changes in `totfatrte`? One reasonably possibility is that `vehicmilespc` contributes to `totfatrte`. The more miles people drive, the higher the probability of an accident. A time plot that shows `vehicmilespc` over time and a scatterplot that show `vehicmilespc` vs `totfatrte` are presented in the appendix. Since `totfatrte` is positively correlated with and potentially confounded by `vehicmilespc`, it will be an important covariate in the models we use in this lab. Likewise, other demographic variables like `unem` and `perc14_24` will be potentially important covariates to include in the models. These variables and their relationship with `totfatrte` are explored in the appendix.
+
+- Another possibility, not mutually exclusive from the first, is that the introduction, adoption, and enforcement of the below laws contribute to `totfatrte`. 
+
+| Variable      | Law           | 
+|:-------------|-------------|
+|               |**Age**      | 
+| `zerotol` & `gdl`     | - zero tolerance & graduated drivers license |    
+|               |**Speed **   |       
+|`slnone`, `sl55`, `sl65`, `sl70`, `sl70plus`,& `sl75`  |  - speed limit: not defined, 55, 65, 70, 70+, and 75  | 
+|               |**Seatbelt** |     
+| `sbprim` & `sbsecon` |  - primary and secondary   |       
+|               |**Alcohol**  |       
+|`zerotol`, `per se`, `minage`, `bac08`, & `bac10` | - zero tolerance, administrative license revocation , minimum drinking age, blood alcohol limit .08 & 0.1 | 
+
+- Evidence of these relationships is presented below, on page 6.
+
+```{r echo=F, warning=F, message=F, fig.cap="The number of states that adpted each law over time"}
+
+# Coerce the data to wide format
+# result_wide <- group_by > summarize
+Law.df.W <- df %>% 
+  select(year, state, sl55, sl65, sl70, sl75, minage, zerotol, gdl, bac10, bac08, perse, sl70plus, sbprim, sbsecon) %>%
+  group_by(year) %>%
+  summarise("N.sl55" = sum(sl55),
+            "N.sl65" = sum(sl65),
+            "N.sl70" = sum(sl70),
+            "N.sl70plus" = sum(sl70plus),
+            "N.sl75" = sum(sl75),
+            # minage
+            "N.zerotol"= sum(zerotol),
+            "N.gdl"= sum(gdl),
+            "N.bac10"= sum(bac10),
+            "N.bac08" =sum(bac08),
+            "N.perse" =sum(perse),
+            "N.sbprim" =sum(sbprim),
+            "N.sbsecon" =sum(sbsecon))
+
+# Coerce the data to wide format
+# result_long <- gather(result_wide)
+Law.df.L <- Law.df.W %>%
+  gather(Law.df.W) %>%
+  mutate(index = rep(1980:2004,13),
+         series = Law.df.W)
+# Reassign long-format data
+Law.df.L <- Law.df.L[c(26:325),c(2:4)]
+# Plot
+ggplot(data=Law.df.L,
+         aes(x=index, y=value, color=series)) +
+  geom_line() + geom_point(size=0.05, alpha=0.5) +
+  labs(y="Number of states that adopted said law",
+       x="Time (1980-2004)")+
+  theme_classic() +
+  facet_wrap(~series) +
+  theme(legend.position="none",
+      axis.text.y=element_text(size=8),
+      axis.text.x=element_text(size=8, angle = 90))
+```
+
+- In figure 3 we see some interesting patterns in law adoption over time. For example, as `bac10` and `sl65` rise and fall, `bac08` is adopted by more and more states over time. Like `bac10`, `gdl` and `zerotol` rise sharply in the early 1990s. Other laws, like the `perse`, `sbprim`, and `slnone` (not show to save space) rise more slowly and consistently over time. Three of the speed limit laws, `sl70`, `sl70plus`, and `sl75` rise abruptly in 1995 and plateau thereafter. 
+
+- In all, we observed various interesting relationships between the dependent variable, `totfatrte`, and putative predictors in the EDA. Next, we will elucidate these relationships with pooled OLS, fixed and random effects models. 
+
+# Part 2
+
+(15%) How is the our dependent variable of interest *totfatrte* defined? What is the average of this variable in each of the years in the time period covered in this dataset? Estimate a linear regression model of *totfatrte* on a set of dummy variables for the years 1981 through 2004. What does this model explain? Describe what you find in this model. Did driving become safer over this period? Please provide a detailed explanation.
+
+- `totfatrte` is the "total fatalities per 100,000 population". These data are collected annually from every state. We log-transformed this variable to achieve normality.
+
+- The average of `totfatrte` in each of the years, across states, is presented below:
+```{r ,warning=F, message=F,}
+# Plot average growth over time
+ftl.per.yr <- df %>%
+  select(year, totfatrte) %>%
+ group_by(year) %>%
+  summarise("year.mu" = mean(totfatrte)) 
+```
+
+```{r, warning=F, message=F, echo=F}
+# suppressing output as this is just code to display avg fat. rte.
+yfrte <- data.frame(round(t(ftl.per.yr$year.mu), 2))
+colnames(yfrte) <- as.character(t(ftl.per.yr$year))
+rownames(yfrte) <- c('Avg. Fat. Rte')
+
+kable(yfrte[1:12], format = "markdown")
+kable(yfrte[13:25], format = "markdown")
+```
+
+- Note that the fluctuations over time described by the above table are also captured by the figure below.
+
+```{r warning=F, message=F,fig.width=4, fig.height=2, fig.cap="Average total fatalities rate per year", echo=FALSE}  
+
+ggplot(ftl.per.yr, aes(x=year, y=year.mu)) +
+  xlab("Time (1980-2004)") +
+  ylab("Average \ntotal fatalities rate") +
+  geom_line(lwd=1,color="grey60") + theme_classic()
+```
+
+- As above and in figure 1 from Freeman 2007 we can see the drop in average nationwide fatalities over time. 
+
+- Now we will estimate a pooled linear regression model with log(`totfatrte`) on a set of dummy variables for the years 1981 through 2004. Note that we will not include the year 1980 and it will be the base level of the model.  
+```{r, warning=F}
+# Coerce data into pdata.frame
+panel.df <- pdata.frame(df, index=c("state","year"))
+# Estimate model
+pOLS.mod.2 <- plm(log(totfatrte) ~ d81 + d82 + d83 + d84 + d85 +
+            d86 + d87 + d88 + d89 + d90 + d91 + d92 + d93 + 
+            d94 + d95 + d96 + d97 + d98 + d99 + d00 + d01 + 
+            d02 + d03 + d04,
+            model="pooling",
+            data=panel.df)
+```
+
+```{r, results="hide"}
+summary(pOLS.mod.2)
+# Robust standard errors
+sqrt(diag(vcovHC(pOLS.mod.2, type='HC0')))
+# Summary
+coeftest(pOLS.mod.2, vcov = vcovHC, type = "HC0")
+```
+
+- The general mathematical form of the pooled OLS model with time indicators only is below. To save space, the coefficients for this model are included when we display all the coefficients in answer to Part 4. To see the specific coefficient values, look ahead to that table. Finally, note that the robust standard errors are used to accommodate the heteroscedastic residuals seen in the appendix. Non-robnust standard errors produce different standard errors and *p*-values.
+$$
+\begin{aligned}
+log(totfatrre) =& \beta_0+\beta_1d_{81}+\beta_2d_{82}...\beta_{24}d_{04}
+\end{aligned}
+$$
+- A summary table of all three models is presented, via stargazer, in response to question 4.
+
+- The above model is a pooled OLS model that explains the average *totfatrte* across all 48 continental states and how it changes over years.
+
+- The intercept is the average fatality rate of all states for the year 1980 (base average `totfatrte`). Every coefficient for the dummy variable for each year then explains how the average `totfatrte` changes relative to the base level of 1980.
+
+- We can see that all coefficients of the dummy variables are negative which means the average `totfatrte`of all states is decreasing relative to the average `totfatrte` in 1980. We can also validate this visually from Figure 4 above.
+
+- Note that all coefficients of dummy variables except for `d81` are highly statistically significant since *p* < $\alpha$ = 0.05. However, we note that the coefficient for dummy variable `d81` becomes highly statistically significant when we use heteroskedasticity robust standard errors.   
+
+- The adjusted $R^2$ tells us that the model only explains about 11% of the total variance in the `totfatrte`. 
+
+- Note that the coefficients of dummy variables for each year are negative with higher descent in the early years and staying almost flat with very low fluctuations from the year 1992. Based on this we can conclude that the model tells us that the `totfatrte` has been lower than the 1980 over years and has been staying almost flat since 1992. This is also visible from the time series plot of average `totfatrte`. Given this is a pooled OLS model which violates the basic independence assumption, the estimates from the model will not be reliable. Hence, although there is visual evidence  and this model supports it, we can not reliably say that the driving has gotten safe over years. 
+
+# Part 3
+
+(15%) Expand your model in *Exercise 2* by adding variables *bac08, bac10, perse, sbprim, sbsecon, sl70plus, gdl, perc14_24, unem, vehicmilespc*, and perhaps *transformations of some or all of these variables*. Please explain carefully your rationale, which should be based on your EDA, behind any transformation you made. If no transformation is made, explain why transformation is not needed. How are the variables *bac8* and *bac10* defined? Interpret the coefficients on *bac08* and *bac10*. Do *per se laws* have a negative effect on the fatality rate? What about having a primary seat belt law? (Note that if a law was enacted sometime within a year the fraction of the year is recorded in place of the zero-one indicator.)
+
+- Before we expand the model to include the variables recommended above, we note that, for the reasons addressed above and summarized below, we will only transform the response variable `totfatrte` and explanatory variable `vehicmilespc`. Both are log-transformed below. The former is transformed to achieve normality and the latter to pull the tails of the distribution towards the center. For the "binary" indicator variables that are expressed as some decimal form of $\frac{m}{12}$ we do not transform the data so as to retain all information that would be lost if we assumed the monthly contributions of law enactments were negligible and rounded to 0 or 1. In other words, we are not transforming the data to (i) preserve information and (ii) not to assume that the fractional monthly components during which the given law was enacted had the same effect as say 0 if $\frac{m}{12}$ < 0.5 or 1 if $\frac{m}{12}$ > 0.5.
+
+- `bac08` and `bac10` are defined as the blood alcohol concentration limit of 0.08 or 0.10, respectively. States without these laws for a given year are assigned 0 . Otherwise, states are assigned $\frac{m}{12}$ where $m$ is the month of law enactment.
+
+- Now we estimate the expanded pooled OLS model:
+```{r results="hide"}
+# Estimate model
+pOLS.mod.3 <- plm(log(totfatrte) ~  d81 + d82 + d83 + d84 + d85 +
+            d86 + d87 + d88 + d89 + d90 + d91 + d92 + d93 + 
+            d94 + d95 + d96 + d97 + d98 + d99 + d00 + d01 + 
+            d02 + d03 + d04 + bac08 + bac10 + perse + sbprim + 
+            sbsecon + sl70plus + gdl + perc14_24 + unem +
+            log(vehicmilespc), 
+            model="pooling", 
+            data=panel.df)
+
+#Summarize model
+summary(pOLS.mod.3)
+
+# Robust standard errors
+sqrt(diag(vcovHC(pOLS.mod.3, type='HC0')))
+coeftest(pOLS.mod.3, vcov = vcovHC, type = "HC0")
+```
+
+- The mathematical form of the model is described below. As mentioned in Part 2 above, the full set of specific coefficient values can be found in the table in answer to Question 4.
+ 
+$$
+\begin{aligned}
+log(totfatrre) =& \beta_0+\beta_1d_{81}+\beta_2d_{82}...\beta_{24}d_{04} + \beta_{25}bac_{08} + \beta_{26}bac_{10} \\
+&+ \beta_{27}perse + \beta_{29}sbprim + \beta_{30}sbsecon + \beta_{31}sl70plus \\
+&+ \beta_{32}gdl + \beta_{33}perc14\_24 +\beta_{34}unem + \beta_{35}log(vehicmilespc)
+\end{aligned}
+$$
+
+- The coefficients for `bac08` and `bac10` are not statistically significant.   
+  1) `bac08` = -0.057667; robust standard error = 0.085126; *p*-value > 0.05. 
+  2) `bac10` = -0.016215; robust standard error = 0.069030 ; *p*-value > 0.05. 
+
+- Thus, if we ignore the assumption of independence, which we have violated by pooling the data, we can interpret the coefficients for `bac08` and `bac10` as follows. For each additional state that adopts `bac08` laws, there is a 5.8%  reduction in `totfatrte` while holding other explanatory variables constant.  
+- Similarly, for each additional state that adopts `bac10` laws, there is a 1.6%  reduction in `totfatrte` while holding other explanatory variables constant.  
+- Thus, the `bac08` law appears to be *more* effective than `bac10` if we ignore  the violated independence assumption.  
+
+- The coefficient for `perse` is -0.025041. The negative sign of the coefficient  indicates that it has a negative effect on the `totfatrte`. However, given its *p*-value > $\alpha$ = 0.05, it is not statistically significant in this model. The interpretation of the coefficient is that for each additional state adopting the `perse` law there is a 2.5% reduction in `totfatrte` while holding other explanatory variables constant.
+
+- The coefficient for primary seat belt law (`sbprim`) is 0.014182. The positive sign of the coefficient indicates that this law surprisingly has positive effect on `totfatrte`. However, given its *p*-value > $\alpha$ = 0.05, this explanatory variable is not statistically significant in this model. The interpretation of the coefficient is that for each additional state adopting the primary seat belt law there is a 1.4% increase in `totfatrte` while holding other explanatory variables constant. Given that we violate the independence assumption, we have to be cautious with this interpretation (especially, the directionality on its effect).  
+
+- Just to clarify, the interpretations above assume that we have not violated the independence assumption. Since we have violated this assumption by ignoring the correlation of errors among cross-sectional units and pooling the data (as opposed to sampling 1200/48=25 observations), the coefficients, standard errors, and *p*-values should be interpreted with caution. Moreover, we assume, by using pooled OLS that the composite error $\alpha_i + \epsilon_{it}$ is not correlated with the observed explanatory variables. This is a strong assumption!
+
+# Part 4
+
+(15%) Reestimate the model from *Exercise 3* using a fixed effects (at the state level) model. How do the coefficients on *bac08, bac10, perse, and sbprim* compare with the pooled OLS estimates? Which set of estimates do you think is more reliable? What assumptions are needed in each of these models?  Are these assumptions reasonable in the current context?
+
+- Below we estimate a fixed effects model. 
+```{r results="hide"}
+# Estimate model
+FE.mod.4 <- plm(log(totfatrte) ~ d81 + d82 + d83 + d84 + d85 +
+            d86 + d87 + d88 + d89 + d90 + d91 + d92 + d93 + 
+            d94 + d95 + d96 + d97 + d98 + d99 + d00 + d01 + 
+            d02 + d03 + d04 + bac08 + bac10 + perse + sbprim + 
+            sbsecon + sl70plus + gdl + perc14_24 + unem + log(vehicmilespc),
+            model="within", data=panel.df)
+
+# Summarize model
+summary(FE.mod.4)
+
+# Robust standard errors
+sqrt(diag(vcovHC(FE.mod.4, type='HC3',method="arellano"))) 
+coeftest(FE.mod.4, vcov = vcovHC, type = "HC3",method="arellano")
+```
+
+- One thing interesting to note is that this model specification ends up deriving the same coefficients as a model that omits the dummy variables, and uses the `effect='twoways'` parameter. For example, the following model produces the same coefficients for $bac_{08},\;bac_{10},\;perse,\;sbprim,\;sbsecon, sl70plus,\;gdl,\;perc14\_24,\;unem,\;and\;vehicmilespc$, without including all the dummy variables in the specification. Because other questions include the time dummy variables, we will stick with that approach, and not use the model below, even though it is equivalent and less verbose. Similarly, we could use `factor(year)` to include the dummy variables for each year.
+
+```{r}
+FE.no.time <- plm(log(totfatrte) ~ bac08 + bac10 + perse + sbprim + 
+            sbsecon + sl70plus + gdl + perc14_24 + unem + log(vehicmilespc), 
+            model="within", effect="twoways", data=panel.df)
+```
+
+- The following table lists the coefficients for the pooled and fixed-effects models we've built up till now:
+```{r pooled_v_fixed, results='asis', warning=F}
+stargazer(pOLS.mod.2, pOLS.mod.3, FE.mod.4,
+          se=list(sqrt(diag(vcovHC(pOLS.mod.2, type='HC0'))),
+                  sqrt(diag(vcovHC(pOLS.mod.3, type='HC0'))),
+                  sqrt(diag(vcovHC(FE.mod.4, type='HC3',method="arellano")))),
+          single.row = TRUE,model.names = FALSE,model.numbers= FALSE,
+          digits = 2,dep.var.caption  = "log of total fatality rate per 100,000 population", dep.var.labels = "",
+          column.labels = c("pooled OLS (Q2)", "pooled OLS (expanded/Q3)", "fixed effect model"),header=FALSE, type='latex')
+```
+- Compare coefficients from each model
+```{r}
+data.frame("pooled.OLS" = c(pOLS.mod.3$coefficients['bac08'],
+                            pOLS.mod.3$coefficients['bac10'],
+                            pOLS.mod.3$coefficients['perse'],
+                            pOLS.mod.3$coefficients['sbprim']),
+           "FixedEffectModel" = c(FE.mod.4$coefficients['bac08'],
+                            FE.mod.4$coefficients['bac10'],
+                            FE.mod.4$coefficients['perse'],
+                            FE.mod.4$coefficients['sbprim']))
+```
+
+- Below are observations for from the above table:
+
+  1) `bac08`: The directionality of effect on `totfatrte` in the fixed effect model remains the same as it is in the pooled OLS model. However, the effect on `totfatrte` reduces to less than half (from 5.8% to 2.2% reduction in `totfatrte` for every additional state adopting this law).  
+  2) `bac10`: The directionality of effect on `totfatrte` in the fixed effect model remains the same as it is in the pooled OLS model. The effect of adoption of this law now comes a lot closer to `bac08`.    
+  3) `perse`: The directionality of effect on `totfatrte` in the fixed effect model remains the same as it is in the pooled OLS model. However, the effect on `totfatrte` increases to more than double (from 2.5% to 5.7% reduction in `totfatrte` for every additional state adopting this law).  
+  4) `sbprim`: Interestingly, the directionality of effect on `totfatrte` in the fixed effect model changes to that of the pooled OLS model. The directionality now makes more sense practically given this law will practically reduce the number of fatalities in case of accidents. The effect of `sbprim` on `totfatrte` is now negative and with a higher magnitude compared to the pooled OLS model. For each additional state adopting this law now is expected to see about 4.3% reduction in `totfatrte` keeping all other variables constant.   
+
+- The estimates from the fixed effect model are likely more reliable because since we are violating fewer assumptions. 
+
+- For both models we assume the typical OLS assumptions. Of these the assumption of no perfect multicollinearity (see appendix) and normality appear to satisfied. Assumptions that are likely violated are discussed below.
+
+- For the pooled OLS model(s) we assume the typical OLS assumptions. Thus, we are violating the assumption of independence by pooling the data for cross-sectional units/states across time. To resolve this problem, we could have subsetted a year of data and proceeded with OLS. Moreover, we assume, that the composite error $\alpha_i + \epsilon_{it}$ is not correlated with the observed explanatory variables, $x_{it}$ - this is a very strong assumption that, if violated, can introduce heterogenity bias, as described by Wooldridge. We also assume that there are no idiosyncratic qualities of each state within each year and no fixed effects over time. If these assumptions are violated than the estimators are biased and inconsistent (Wooldridge).
+
+- For the fixed effect model, we assume OLS assumptions and that $\epsilon_{it}$ does not vary stochastically over $_i$ or $_t$. We assume that there are idiosyncratic qualities of each state but. if these attributes do not change over time, they are soaked up by the fixed effects. 
+
+- Thus, based on the discussion above, we argue that the fixed effects estimates are more reliable. More explicitly, the fixed effects model estimates are more reliable than the pooled OLS estimates because:
+- For the pooled OLS estimates, we assume:
+  - The data are independent and identically distributed. This assumption is clearly violated since we sampled data from 48 states over 25 years. If we just sampled a single year cross-section, we could argue otherwise.
+  - The composite error $\alpha_i + \epsilon_{it}$ is not correlated with the observed explanatory variables. The assumption seems unreasonable for reasons formulated below.
+  - There are no idiosyncratic feature of each state and no fixed effects over time. This assumption also seems unreasonable for reasons discussed above and below.
+
+- For the fixed effect model, we assume:
+  - $\epsilon_{it}$ does not vary stochastically over $_i$ or $_t$. The assumption seems unreasonable for reasons discussed above and below.
+  - strict exogeneity for the explanatory variables. If the idiosyncratic error $u_{it}$ is uncorrelated with the explanatory variable across all time periods, $x_{ijt}$ than the fixed effects estimator is not biased (Wooldridge).
+
+- Finally, before we proceed with question 5 we test the Lagrange multiplier $H_0$ that the pooled OLS model is better than a fixed effects model
+
+```{r}
+# null: pooled OLS better than fixed
+pFtest(FE.mod.4, pOLS.mod.3)
+```
+
+- We rejected the $H_0$ and conclude that the fixed effect model, for the many reasons described above, is a better approach than the pooled OLS model.
+
+# Part 5
+
+(10%) Would you perfer to use a random effects model instead of the fixed effects model you built in *Exercise 4*? Please explain.
+
+- First we fit a random-effects model:
+```{r}
+# Fit Random effects model
+RE.mod.5 <- plm(log(totfatrte) ~ d81 + d82 + d83 + d84 + d85 +
+            d86 + d87 + d88 + d89 + d90 + d91 + d92 + d93 + 
+            d94 + d95 + d96 + d97 + d98 + d99 + d00 + d01 + 
+            d02 + d03 + d04 + bac08 + bac10 + perse + sbprim + 
+            sbsecon + sl70plus + gdl + perc14_24 + unem + log(vehicmilespc), 
+            model="random", data=panel.df)
+```
+
+```{r, results="hide"}
+# Robust standard errors
+summary(RE.mod.5)
+sqrt(diag(vcovHC(FE.mod.4, type='HC3',method="white2")))
+coeftest(FE.mod.4, vcov = vcovHC, type = "HC3",method="white2")
+```
+
+- The results of the expanded pooled OLS from part 3, the fixed effects model from part 4, and the random effects model from part 5 are present in table 5 below.
+
+```{r pooled_v_fixed_v_random, results='asis', warning=F, echo=F}
+stargazer(pOLS.mod.3, FE.mod.4, RE.mod.5,
+         se=list(sqrt(diag(vcovHC(pOLS.mod.3, type='HC0'))),
+         sqrt(diag(vcovHC(FE.mod.4, type='HC3',method="arellano"))),
+         sqrt(diag(vcovHC(RE.mod.5, type='HC3',method="white2")))),
+          single.row = TRUE, model.names = FALSE, 
+          model.numbers= FALSE,digits = 2,
+          dep.var.caption  = "log of total fatality rate per 100,000 population", 
+          dep.var.labels = "",
+          column.labels = c("pooled effect model (Q3)", "fixed effect model (Q4)", "random effect model (Q5)"),
+          header=F, type='latex')
+```
+
+- To test the $H_0$ that the idiosyncratic errors, $u_{it}$ are not correlated with the regressors, and the random effects model is preferred, we use the Hausman test:
+
+```{r}
+# Hausman test
+phtest(FE.mod.4, RE.mod.5)
+```
+
+- In this case, the Hausman test tells us to reject the null hypothesis, meaning that the unique errors are correlated, and we should prefer a fixed effects model to the random effects model.
+
+- Our intuition corroborates the results of the Hausman test since the cross sectional units, the $\frac{48}{50}$ contiguous US states, are not a random selection of states from a universe of many possible states. Instead they are a very specific subset of the US states- those that are contiguous. Thus, we should used a fixed effects model.
+
+# Part 6
+
+(10%) Suppose that *vehicmilespc*, the number of miles driven per capita, increases by $1,000$. Using the FE estimates, what is the estimated effect on *totfatrte*? Please interpret the estimate.
+
+- Given that we have log-log transformation of `totfatrte` and `vehicmilespc` in the fixed effects model, the interpretation of the coefficient for `vehicmilespc` is the elasticity of `totfatrte` with respect to `vehicmilespc`. Let's assume the coefficient of the log of `vehicmilespc` is $\beta$ in the fixed effects model. The interpretation of this coefficient is that every 1% increase in `vehicmilespc` will result in the increase of $\beta \%$ in the dependent variable, `totalfatrte`.      
+
+- Mathematically, the interpretation is represented as below.  
+$$
+\% \triangle \text{ totfatrte} = \% \triangle \text{ vehicmilespc} \times \beta
+$$
+- Note that $\beta$ is constant for all levels of `vehicmilespc`.  
+
+- The effect of increase in the number of miles driven per capita (`vehicmilespc`) on `totfatrte` is dependent on its percentage change.  
+
+- Let's take a couple of examples. In the first case, the `vehicmilespc` for a given state is $10,000$ and in the second case it is $15,000$. We are interested to know the effect of increasing this by $1,000$ miles on the `totfatrte`. Below, we calculate this effect.  
+
+```{r warning=F}
+# Estimated effect of 1000 miles increase in vehicmilespc
+beta <- FE.mod.4$coefficients['log(vehicmilespc)']
+data.frame(base_vehicmilespc = c('10,000', '15,000'), beta=beta, increase_in_miles=1000, pct_effect_on_totfatrte = c((1000/10000)*100*beta, (1000/15000)*100*beta))
+```
+
+- Thus, *ceteris paribus*, if the number of miles driven per capita (`vehicmilespc`) increase by $1,000$ miles from $10,000$ then the total fatalities rate (`totfatrte`) increases by `r round((1000/10000)*100*FE.mod.4$coefficients['log(vehicmilespc)'],2)`%.   
+- Similarly, *ceteris paribus*, if the number of miles driven per capita (`vehicmilespc`) increase by $1,000$ miles from $15,000$ then the total fatalities rate (`totfatrte`) increases by `r round((1000/15000)*100*FE.mod.4$coefficients['log(vehicmilespc)'],2)`%.   
+
+- The effect seems practical and reasonable because as people drive more, there are more chances of getting into accidents and thus for increase in fatalities. As expected, the effect is more pronounced when the percentage change in `vehicmilespc` is higher.  
+
+# Part 7
+
+(5%) If there is serial correlation or heteroskedasticity in the idiosyncratic errors of the model, what would be the consequences on the estimators and their standard errors?
+
+-  The estimators will be biased and not efficient (Wooldridge) if the idiosyncratic errors, $u_{it}$ are correlated.
+
+- To test the $H_0^1$ that there is not serial correlation in the errors we used the Breusch-Godfrey/Wooldridge test.
+
+- To test the $H_0^2$ that that the residuals across
+states are not correlated we used the Bruesh-Pagan Lagrange Multiplier test for independence.
+
+- To test the $H_0^3$ that the residuals are homoskedasticity we used the Bruesch-Pagan test for homoskedasticity.
+```{r}
+# Breusch-Godfrey/Wooldridge test for serial correlation
+pbgtest(FE.mod.4)
+# cross-sectional dependence 
+pcdtest(FE.mod.4,
+        test = c("lm"))
+# Bruesh-Pagan test for homoskedasticity
+bptest(log(totfatrte) ~ d81 + d82 + d83 + d84 + d85 +
+            d86 + d87 + d88 + d89 + d90 + d91 + d92 + d93 + 
+            d94 + d95 + d96 + d97 + d98 + d99 + d00 + d01 + 
+            d02 + d03 + d04 + bac08 + bac10 + perse + sbprim + 
+            sbsecon + sl70plus + gdl + perc14_24 + unem + log(vehicmilespc),
+            data=panel.df, studentize=F)
+```
+- We rejected $H_0^1$: that there is no serial correlation in the errors; $H_0^2$: that the residuals are not correlated across cross-sectional units, states; and $H_0^3$ that the residuals are homoskedasticity.
+
+- Thus, since the idiosynratic errors are serially correlated and heteroskedasticity, the estimators and their standard errors will be biased and inefficient, respectively.
+
+- Finally, we synthesize our response to the question: **"Do changes in traffic laws affect traffic fatalities?"**. First, we note that we cannot make any casual claims here even though we have controlled for various factors, some of which are potential confounders. Second, we echo the conclusions of Freeman (2007) who, armed with similar data that analyzed differently, converged on the same conclusion: the revision of blood-alcohol content (BAC) laws from $0.1\;g/dL$(`bac10`) to $0.08\;g/dL$ (`bac08`) does not appear to affect total traffic fatilities **once** we include covariates that control for potential confounders, like `vehiclemilespc`.Conversely, other laws, like the the administrative license revocation (i.e. per se law,`perse`), the primary seatbelt law (`sbprim`), and the 70 mile plus per hour speed limit law significantly affected total traffic fatalities.
+
+- These conclusions, that the administrative license revocation, primary seatbelt,and the 70 mile plus per hour speed limit laws are consistent with the expectations of traffic safety experts expressed here:  https://www.nhtsa.gov/sites/nhtsa.dot.gov/files/810878.pdf. Moreover, the effects of these laws on traffic fatalities corroborates our intuitions that (i) seat belts (ii) immediate revocation of drivers licenses, and (iii) slower speed limits all reduce fatalities by keeping people safe in their vehicles and removing drunk drivers from the roadways.
+
+\newpage
+
+# Appendix
+
+## Question 1 (Additional EDA)
+
+- Evidence of top- or bottom-coded values of `totfatrte` are not present for any state since no sharp thresholds beyond which values are censored are apparent.
+
+```{r}
+# By state
+ggplot(Statesdf, aes(totfatrte,colour = region)) +
+  geom_histogram() +
+  facet_wrap(~region) + 
+  theme_classic() +
+  theme(legend.position="none",
+      axis.text.y=element_text(size=4),
+      axis.text.x=element_text(size=4, angle = 90))
+```
+
+- `vehiclemilespc` vs time and `vehiclemilespc` vs `totfatrte`.
+
+```{r fig.cap="Relationship of vehicle miles per capita with total fatalities per 100,000 population", echo=F, message=F, warning=F} 
+
+A <- ggplot(df, 
+       aes(x=factor(year), y=vehicmilespc),
+        group=year) +
+  geom_boxplot(color="grey60", outlier.colour = "grey60") +
+  geom_jitter(alpha=0.4,color="grey60",
+              position=position_jitter(width=0.1)) +
+  geom_smooth(method = "loess", se=F, 
+              aes(group=1), span=0.1, color="grey40", alpha=0.7) +
+  labs(title="A", y=expression("log("~paste(frac("Vehical miles", "capita"))~")"), x="Time (1980-2004)") +
+  theme_classic()
+
+# Scatterplot
+B <- ggplot(df, 
+       aes(x=vehicmilespc, y=totfatrte),
+        group=state) +
+  geom_point(alpha=0.4,color="grey60",
+              position=position_jitter(width=0.1)) +
+  geom_smooth(method = "loess", se=F, 
+              aes(group=1), span=0.1, color="grey40", alpha=0.7) +
+  labs(title="B", y=expression("log("~paste(frac("Total fatalities", "100,000 population"))~")"), x=expression("log("~paste(frac("Vehical miles", "capita"))~")")) +
+  theme_classic()
+# Plot
+grid.arrange(A,B)
+```
+
+- Relationships between `totfatrte` and `perc14_24` and `unem`.
+
+```{r warning=F, message=F, fig.cap="Relationship between the totfatrte and several potentially important predictors"}
+
+# Scatterplot matrix
+GGally::ggpairs(df,
+        aes(alpha=1/4),
+        mapping=ggplot2::aes(colour = factor(state),alpha=1/4),
+        columns=c("totfatrte","perc14_24", "unem" ,"vehicmilespc", "year"),
+        lower= list(continuous = "points"),
+        upper=list(continuous="density"),
+        diag=list(continuous="densityDiag"))+
+        theme_classic()
+```
+
+
+## Question 4
+- Scatterplot matrix
+
+```{r message=F, warning=F} 
+
+# # Scatterplot matrix
+# GGally::ggpairs(df,
+#         aes( alpha=1/2),
+#         mapping=ggplot2::aes(colour = factor(state)),
+#         columns=c("totfatrte","d81","d82", "d83","d84", "d85","d86","d87","d88" , "d89" , "d90" , "d91" , "d92" ,"d93" ,"d94" , "d95" , "d96", "d97" , "d98" , "d99" , "d00" ,"d01","d02", "d03", "d04","bac08","bac10","perse", "sbprim","sbsecon", "sl70plus" , "gdl" ,"perc14_24", "unem" ,"vehicmilespc", "year"),
+#         lower= list(continuous = "points"),
+#         upper=list(continuous="blank"),
+#         diag=list(continuous="blankDiag"))+
+#         theme_classic()
+```
+
+- correlations of variables used in models:
+
+```{r}
+# Variables
+corrs <- cor(df[,c("totfatrte","d81","d82", "d83","d84", "d85","d86","d87","d88" , "d89" , "d90" , "d91" , "d92" ,"d93" ,"d94" , "d95" , "d96", "d97" , "d98" , "d99" , "d00" ,"d01","d02", "d03", "d04","bac08","bac10","perse", "sbprim","sbsecon", "sl70plus" , "gdl" ,"perc14_24", "unem" ,"vehicmilespc", "year")])
+#
+#round(corrs,2)
+```
+
+## Question 5
+
+- Comparing demeaned fixed effects for each state
+
+```{r}
+summary(fixef(FE.mod.4, type="dmean"))
+summary(fixef(FE.no.time, type="dmean"))
+```
+
+## Diagnostic plots for models
+
+```{r  fig.height=11, fig.width=8, fig.cap="Diagnostic plots"}
+
+
+# 2
+RvF.2 <- ggplot(data=df) +
+  geom_point(aes(y=residuals(pOLS.mod.2), x=fitted(pOLS.mod.2))) +
+  theme_classic() + stat_smooth(method="loess",aes(y=residuals(pOLS.mod.2), x=fitted(pOLS.mod.2))) + 
+  geom_hline(yintercept=0, col="red", linetype="dashed") +
+  labs(title="pooled OLS",x="fitted values",y="residuals")
+QQ.2 <- ggplot(df, aes(sample=pOLS.mod.2$residuals)) + 
+  stat_qq() + stat_qq_line(color="blue") + theme_classic() 
+# 3
+RvF.3 <- ggplot(data=df) +
+  geom_point(aes(y=residuals(pOLS.mod.3), x=fitted(pOLS.mod.3))) +
+  theme_classic() +stat_smooth(method="loess",aes(y=residuals(pOLS.mod.3), x=fitted(pOLS.mod.3))) + 
+  geom_hline(yintercept=0, col="red", linetype="dashed") 
+  labs(title="expanded pooled OLS",x="fitted values",y="residuals")
+QQ.3 <- ggplot(df, aes(sample=pOLS.mod.3$residuals)) + 
+  stat_qq() + stat_qq_line(color="blue") + theme_classic()
+# 4
+RvF.4 <- ggplot(data=df) +
+  geom_point(aes(y=residuals(FE.mod.4), x=fitted(FE.mod.4))) +
+  theme_classic() +stat_smooth(method="loess",aes(y=residuals(FE.mod.4), x=fitted(FE.mod.4))) + 
+  geom_hline(yintercept=0, col="red", linetype="dashed") 
+  labs(title="fixed effects model",x="fitted values",y="residuals")
+QQ.4 <- ggplot(df, aes(sample=FE.mod.4$residuals)) + 
+  stat_qq() + stat_qq_line(color="blue") + theme_classic()
+# 5
+RvF.5 <- ggplot(data=df) +
+  geom_point(aes(y=residuals(RE.mod.5), x=fitted(RE.mod.5))) +
+  theme_classic() +stat_smooth(method="loess",aes(y=residuals(RE.mod.5), x=fitted(RE.mod.5))) + 
+  geom_hline(yintercept=0, col="red", linetype="dashed") 
+  labs(title="random effects model",x="fitted values",y="residuals")
+QQ.5 <- ggplot(df, aes(sample=RE.mod.5$residuals)) + 
+  stat_qq() + stat_qq_line(color="blue") + theme_classic()
+# Arrange
+grid.arrange(RvF.2,QQ.2,
+             RvF.3,QQ.3,
+             RvF.4,QQ.4,
+             RvF.5,QQ.5,
+             ncol=2)
+
+```
+
+
+
+
+
